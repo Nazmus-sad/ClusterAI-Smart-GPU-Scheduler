@@ -1,0 +1,17 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# Redirect API requests to the deployed Firebase Function.
+# Note: You should replace the placeholder project ID with your actual Firebase project ID.
+[[redirects]]
+  from = "/api/*"
+  to = "https://clusterai-fg7wtm3pnq-uc.a.run.app/api/:splat"
+  status = 200
+  force = true
+
+# Fallback for SPA routing - redirects all other requests to index.html
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

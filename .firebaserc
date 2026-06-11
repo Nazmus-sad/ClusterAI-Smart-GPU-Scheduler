@@ -1,0 +1,5 @@
+{
+  "projects": {
+    "default": "clusterai-smart-gpu-scheduler"
+  }
+}

@@ -23,6 +23,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ─── Firebase Firestore Setup ────────────────────────────────────────────────
+USE_FIRESTORE = False
+db = None
+
+if os.environ.get("K_SERVICE") or os.environ.get("FIREBASE_CONFIG"):
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, firestore
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app()
+        db = firestore.client()
+        USE_FIRESTORE = True
+        print("Firestore initialized successfully in Cloud Functions environment.")
+    except Exception as e:
+        print(f"Failed to initialize Firestore: {e}. Falling back to in-memory store.")
+
 # ─── GPU Cluster State ───────────────────────────────────────────────────────
 
 GPU_MODELS = [
@@ -119,19 +135,57 @@ def schedule_job(job: JobRequest):
     gpu_telemetry = [_simulate_telemetry(i) for i in range(3)]
     result = predict_best_gpu(gpu_telemetry, job.task_type, job.required_memory)
 
-    _job_counter += 1
+    # Determine job number using Firestore if active
+    if USE_FIRESTORE and db is not None:
+        try:
+            counter_ref = db.collection("metadata").document("counters")
+            @firestore.transactional
+            def update_counter(transaction, ref):
+                snapshot = ref.get(transaction=transaction)
+                count = 0
+                if snapshot.exists:
+                    count = snapshot.to_dict().get("job_count", 0)
+                new_count = count + 1
+                transaction.update(ref, {"job_count": new_count})
+                return new_count
+
+            if not counter_ref.get().exists:
+                counter_ref.set({"job_count": 0})
+            
+            transaction = db.transaction()
+            current_job_num = update_counter(transaction, counter_ref)
+        except Exception as e:
+            print(f"Firestore counter failed, using local: {e}")
+            _job_counter += 1
+            current_job_num = _job_counter
+    else:
+        _job_counter += 1
+        current_job_num = _job_counter
+
+    job_id = f"job-{current_job_num:04d}"
     job_record = {
-        "job_id": f"job-{_job_counter:04d}",
+        "job_id": job_id,
         "task_type": job.task_type,
         "required_memory": job.required_memory,
         "recommended_gpu": result["recommended_gpu"],
-        "confidence": result["confidence"],
+        "confidence": float(result["confidence"]),
         "timestamp": time.time(),
         "gpu_snapshot": gpu_telemetry,
     }
-    _job_history.append(job_record)
-    if len(_job_history) > 50:
-        _job_history.pop(0)
+
+    # Save job using Firestore if active
+    if USE_FIRESTORE and db is not None:
+        try:
+            db.collection("jobs").document(job_id).set(job_record)
+        except Exception as e:
+            print(f"Failed to save job to Firestore: {e}")
+            _job_history.append(job_record)
+            if len(_job_history) > 50:
+                _job_history.pop(0)
+    else:
+        _job_history.append(job_record)
+        if len(_job_history) > 50:
+            _job_history.pop(0)
 
     return {
         "status": "success",
@@ -145,6 +199,17 @@ def schedule_job(job: JobRequest):
 @app.get("/api/jobs", summary="Get recent job scheduling history")
 def get_job_history():
     """Returns the last 50 scheduled jobs and their outcomes."""
+    if USE_FIRESTORE and db is not None:
+        try:
+            jobs_ref = db.collection("jobs")
+            docs = jobs_ref.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(50).stream()
+            history = []
+            for doc in docs:
+                history.append(doc.to_dict())
+            return history
+        except Exception as e:
+            print(f"Failed to query jobs from Firestore: {e}")
+            return list(reversed(_job_history))
     return list(reversed(_job_history))
 
 
@@ -155,16 +220,37 @@ def get_cluster_metrics():
     avg_usage = sum(g["usage"] for g in telemetry) / 3
     avg_temp = sum(g["temperature"] for g in telemetry) / 3
     idle_count = sum(1 for g in telemetry if g["usage"] < 25)
+
+    total_jobs = _job_counter
+    if USE_FIRESTORE and db is not None:
+        try:
+            counter_ref = db.collection("metadata").document("counters")
+            counter_doc = counter_ref.get()
+            if counter_doc.exists:
+                total_jobs = counter_doc.to_dict().get("job_count", 0)
+        except Exception as e:
+            print(f"Failed to query job count from Firestore: {e}")
+
     return {
         "avg_usage": round(avg_usage, 2),
         "avg_temperature": round(avg_temp, 2),
         "idle_gpu_count": idle_count,
-        "jobs_scheduled": _job_counter,
-        "estimated_cost_savings_pct": round(min(42.0, 15.0 + (_job_counter * 0.8)), 1),
-        "scheduling_efficiency_pct": round(min(97.0, 78.0 + (_job_counter * 0.5)), 1),
+        "jobs_scheduled": total_jobs,
+        "estimated_cost_savings_pct": round(min(42.0, 15.0 + (total_jobs * 0.8)), 1),
+        "scheduling_efficiency_pct": round(min(97.0, 78.0 + (total_jobs * 0.5)), 1),
     }
 
 
 @app.get("/health")
 def health_check():
     return {"status": "ok", "uptime_seconds": round(time.time() - _start_time, 1)}
+
+
+# ─── Firebase Cloud Function Export ──────────────────────────────────────────
+# Expose the FastAPI app as a Firebase Cloud Function named "clusterai"
+try:
+    from firebase_functions import https_fn
+    clusterai = https_fn.on_request(app)
+except Exception:
+    pass
+
