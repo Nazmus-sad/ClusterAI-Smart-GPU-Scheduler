@@ -2,11 +2,10 @@
   command = "npm run build"
   publish = "dist"
 
-# Redirect API requests to the deployed Firebase Function.
-# Note: You should replace the placeholder project ID with your actual Firebase project ID.
+# Redirect API requests to the deployed Firebase Function or Render Backend.
 [[redirects]]
   from = "/api/*"
-  to = "https://clusterai-fg7wtm3pnq-uc.a.run.app/api/:splat"
+  to = "https://clusterai-smart-gpu-scheduler.onrender.com/api/:splat"
   status = 200
   force = true
 
