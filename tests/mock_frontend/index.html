@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Scheduler Dashboard Mockup</title>
+    <style>
+        /* CSS simulating Tailwind dark theme classes for local self-contained rendering */
+        body.bg-gray-900 {
+            background-color: #111827;
+            color: #f9fafb;
+            font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0;
+            padding: 2rem;
+            box-sizing: border-box;
+        }
+        .text-white {
+            color: #ffffff;
+        }
+        .gpu-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        /* Desktop vs Mobile layout styling */
+        @media (max-width: 768px) {
+            .gpu-grid {
+                grid-template-columns: repeat(1, minmax(0, 1fr));
+            }
+        }
+        .gpu-card {
+            border: 1px solid #374151;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            background-color: #1f2937;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .metric-red {
+            color: #ef4444;
+            font-weight: bold;
+            animation: pulse 2s infinite;
+        }
+        .metric-normal {
+            color: #10b981;
+        }
+        .submit-panel {
+            border: 1px solid #374151;
+            padding: 2rem;
+            border-radius: 0.5rem;
+            background-color: #1f2937;
+            max-width: 500px;
+        }
+        .btn {
+            background-color: #3b82f6;
+            color: white;
+            padding: 0.625rem 1.25rem;
+            border: none;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background-color 0.2s;
+        }
+        .btn:disabled {
+            background-color: #4b5563;
+            cursor: not-allowed;
+        }
+        .error-alert {
+            background-color: #fef2f2;
+            color: #991b1b;
+            padding: 1rem;
+            border-radius: 0.375rem;
+            margin-bottom: 1rem;
+            display: none;
+            border: 1px solid #fca5a5;
+        }
+        .form-error {
+            color: #ef4444;
+            margin-top: 0.5rem;
+            font-size: 0.875rem;
+        }
+        input, select {
+            background-color: #374151;
+            color: white;
+            border: 1px solid #4b5563;
+            padding: 0.5rem;
+            border-radius: 0.375rem;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        input:invalid {
+            border-color: #ef4444;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .5; }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+    <h1 class="text-white">GPU Scheduler Dashboard</h1>
+    
+    <div id="error-alert" class="error-alert" role="alert"></div>
+
+    <div id="gpu-container" class="gpu-grid" data-testid="gpu-grid">
+        <!-- GPU cards are rendered here -->
+    </div>
+
+    <div class="submit-panel">
+        <h2 class="text-white">Submit Scheduling Job</h2>
+        <form id="job-form">
+            <div style="margin-bottom: 1rem;">
+                <label style="display:block; margin-bottom:0.5rem;">Task Type:</label>
+                <select name="task_type" data-testid="task-type-select">
+                    <option value="training">training</option>
+                    <option value="inference">inference</option>
+                    <option value="data_processing">data_processing</option>
+                </select>
+            </div>
+            <div style="margin-bottom: 1.5rem;">
+                <label style="display:block; margin-bottom:0.5rem;">Required Memory (GB):</label>
+                <input type="number" name="required_memory" step="0.1" value="16.0" data-testid="required-memory-input">
+                <div id="form-error" class="form-error"></div>
+            </div>
+            <button type="submit" id="submit-job-btn" class="btn" data-testid="submit-job-btn">Submit Job</button>
+        </form>
+        
+        <div id="result" style="margin-top: 1.5rem; display: none;" data-testid="recommendation-result">
+            <h3 class="text-white">Scheduling Recommendation</h3>
+            <p>Recommended GPU: <strong id="recommended-gpu" data-testid="recommended-gpu"></strong></p>
+            <p>Confidence: <span id="recommendation-confidence" data-testid="recommendation-confidence"></span></p>
+        </div>
+    </div>
+
+    <script>
+        const errorAlert = document.getElementById('error-alert');
+        const submitBtn = document.getElementById('submit-job-btn');
+        const formError = document.getElementById('form-error');
+        const resultContainer = document.getElementById('result');
+        const recGpu = document.getElementById('recommended-gpu');
+        const recConf = document.getElementById('recommendation-confidence');
+        const memoryInput = document.querySelector('[data-testid="required-memory-input"]');
+
+        async function fetchGpus() {
+            try {
+                const response = await fetch('/api/gpus');
+                if (!response.ok) {
+                    throw new Error("Telemetry server offline");
+                }
+                const gpus = await response.json();
+                
+                // Clear any offline alert
+                errorAlert.style.display = 'none';
+                if (!memoryInput.style.borderColor || memoryInput.style.borderColor !== 'red') {
+                    submitBtn.removeAttribute('disabled');
+                }
+
+                document.getElementById('gpu-container').innerHTML = gpus.map(gpu => {
+                    const tempClass = gpu.temperature > 80.0 ? 'metric-red' : 'metric-normal';
+                    const usageClass = gpu.usage > 90.0 ? 'metric-red' : 'metric-normal';
+                    
+                    return `
+                        <div class="gpu-card" data-testid="gpu-card" id="${gpu.id}">
+                            <h3 class="text-white">${gpu.name || gpu.id}</h3>
+                            <p>Usage: <span data-testid="gpu-usage" class="${usageClass}">${gpu.usage.toFixed(1)}</span>%</p>
+                            <p>Temp: <span data-testid="gpu-temp" class="${tempClass}">${gpu.temperature.toFixed(1)}</span>°C</p>
+                            <p>Memory: <span data-testid="gpu-mem">${gpu.memory_usage.toFixed(1)}</span>%</p>
+                            <p>Queue: <span data-testid="gpu-queue">${gpu.queue_length}</span></p>
+                        </div>
+                    `;
+                }).join('');
+            } catch (err) {
+                console.error(err);
+                errorAlert.innerText = "Telemetry server offline";
+                errorAlert.style.display = 'block';
+                submitBtn.setAttribute('disabled', 'true');
+            }
+        }
+
+        document.getElementById('job-form').onsubmit = async (e) => {
+            e.preventDefault();
+            formError.innerText = "";
+            memoryInput.style.borderColor = "";
+
+            const formData = new FormData(e.target);
+            const memoryVal = parseFloat(formData.get('required_memory'));
+
+            // Client-side validation: boundary & corner cases
+            if (isNaN(memoryVal) || memoryVal <= 0.0) {
+                formError.innerText = "Memory must be greater than 0";
+                memoryInput.style.borderColor = "red";
+                return;
+            }
+
+            // Disable button immediately to prevent double submissions
+            submitBtn.setAttribute('disabled', 'true');
+
+            const payload = {
+                task_type: formData.get('task_type'),
+                required_memory: memoryVal
+            };
+
+            try {
+                const response = await fetch('/api/schedule', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.detail || "Failed to schedule job");
+                }
+
+                const result = await response.json();
+                recGpu.innerText = result.recommended_gpu;
+                recConf.innerText = result.confidence.toFixed(2);
+                resultContainer.style.display = 'block';
+            } catch (err) {
+                formError.innerText = err.message;
+            } finally {
+                // Re-enable button after request is complete
+                submitBtn.removeAttribute('disabled');
+            }
+        };
+
+        // Initial fetch and set polling interval
+        fetchGpus();
+        setInterval(fetchGpus, 2000);
+    </script>
+</body>
+</html>
